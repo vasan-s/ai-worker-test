@@ -1,3 +1,5 @@
+# .github/workflows/ai-worker.yml
+
 name: AI Worker Manual
 
 on:
@@ -32,11 +34,11 @@ permissions:
 
 jobs:
   ai-change:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
-      - name: Checkout
+      - name: Checkout main
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -47,32 +49,24 @@ jobs:
           echo "Title: ${{ inputs.ticket_title }}"
           echo "Agent: ${{ inputs.agent }}"
 
-      # - name: Create branch
-      #   run: |
-      #     git checkout -b ai/task-${{ inputs.ticket_id }}-${{ github.run_id }}
-
       - name: Placeholder AI step
         run: |
           echo "Later this step will run Claude Code or Codex"
           echo "For now, manual trigger is working."
 
-      - name: Validate no forbidden changes
-        run: |
-          echo "No AI changes yet, so validation passes."
-
-      - name: Create empty test PR marker
+      - name: Create test change
         run: |
           mkdir -p .ai-runs
-          echo "AI manual run for ${{ inputs.ticket_id }}" > .ai-runs/${{ github.run_id }}.txt
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .ai-runs/${{ github.run_id }}.txt
-          git commit -m "chore: test AI worker for task ${{ inputs.ticket_id }}"
+          echo "AI manual run for ticket/task ${{ inputs.ticket_id }}" > .ai-runs/${{ github.run_id }}.txt
+          echo "Title: ${{ inputs.ticket_title }}" >> .ai-runs/${{ github.run_id }}.txt
+          echo "Agent: ${{ inputs.agent }}" >> .ai-runs/${{ github.run_id }}.txt
 
       - name: Create PR
         uses: peter-evans/create-pull-request@v6
         with:
+          base: main
           branch: ai/task-${{ inputs.ticket_id }}-${{ github.run_id }}
+          commit-message: "chore: test AI worker for task ${{ inputs.ticket_id }}"
           title: "AI task test: ${{ inputs.ticket_title }}"
           body: |
             Source: Manual workflow
@@ -82,7 +76,11 @@ jobs:
             Task:
             ${{ inputs.ticket_body }}
 
+            Agent selected: ${{ inputs.agent }}
+
             This is a manual test PR from the AI harness workflow.
+            Human review required.
           labels: |
             ai-generated
             needs-human-review
+          delete-branch: true
