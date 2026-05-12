@@ -17,6 +17,10 @@ on:
         description: "Task details / acceptance criteria"
         required: true
         type: string
+      reviewers:
+        description: "Comma-separated GitHub usernames, e.g. user1,user2"
+        required: false
+        type: string
       agent:
         description: "AI agent"
         required: true
@@ -61,6 +65,23 @@ jobs:
           echo "Title: ${{ inputs.ticket_title }}" >> .ai-runs/${{ github.run_id }}.txt
           echo "Agent: ${{ inputs.agent }}" >> .ai-runs/${{ github.run_id }}.txt
 
+      - name: Resolve reviewers
+        id: reviewers
+        run: |
+          REVIEWERS=""
+
+          if [ "${{ github.event_name }}" = "issues" ]; then
+            REVIEWERS=$(echo '${{ toJson(github.event.issue.assignees) }}' | jq -r '.[].login' | paste -sd "," -)
+          else
+            REVIEWERS="${{ inputs.reviewers }}"
+          fi
+
+          if [ -z "$REVIEWERS" ]; then
+            REVIEWERS="vasan-s"
+          fi
+
+          echo "reviewers=$REVIEWERS" >> "$GITHUB_OUTPUT"
+
       - name: Create PR
         uses: peter-evans/create-pull-request@v6
         with:
@@ -84,3 +105,4 @@ jobs:
             ai-generated
             needs-human-review
           delete-branch: true
+          reviewers: ${{ steps.reviewers.outputs.reviewers }}
