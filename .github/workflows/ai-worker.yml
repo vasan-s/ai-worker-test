@@ -47,9 +47,9 @@ jobs:
           echo "Title: ${{ inputs.ticket_title }}"
           echo "Agent: ${{ inputs.agent }}"
 
-      - name: Create branch
-        run: |
-          git checkout -b ai/task-${{ inputs.ticket_id }}-${{ github.run_id }}
+      # - name: Create branch
+      #   run: |
+      #     git checkout -b ai/task-${{ inputs.ticket_id }}-${{ github.run_id }}
 
       - name: Placeholder AI step
         run: |
