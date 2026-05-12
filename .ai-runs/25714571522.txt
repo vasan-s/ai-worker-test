@@ -1,0 +1,3 @@
+AI manual run for ticket/task 1
+Title: task title
+Agent: claude
