@@ -1,0 +1,53 @@
+# .github/ISSUE_TEMPLATE/ai-task.yml
+
+name: AI Task
+description: Task for AI agent to implement
+title: "[AI Task]: "
+labels: ["ready-for-ai"]
+assignees: []
+
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What needs to be fixed or built?
+      placeholder: Describe the issue clearly.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected Behavior
+      description: What should happen after this task is complete?
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance Criteria
+      description: Concrete checklist the AI must satisfy.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints / Out of Scope
+      description: What should the AI not touch?
+      placeholder: Do not modify auth, infra, workflows, secrets, etc.
+    validations:
+      required: false
+
+  - type: textarea
+    id: testing
+    attributes:
+      label: Testing Expectations
+      description: What tests should pass or be added?
+    validations:
+      required: false
