@@ -1,223 +1,297 @@
 # .github/workflows/ai-worker.yml
+#
+# Drives an AI coding agent (currently Claude) end-to-end on a single ticket.
+#
+# Entry points:
+#   1. Issue gets the `ready-for-ai` label
+#   2. Projects v2 item Status changes to "Ready for AI"
+#   3. Manual replay via workflow_dispatch
+#
+# The agent NEVER pushes to main. It pushes to ai/<agent>/issue-<id>-<run> and
+# opens a draft PR. CI + ai-pr-guard then run on that PR and must pass before
+# a human can merge.
 
-name: AI Worker Manual
+name: AI Worker
 
 on:
+  issues:
+    types: [labeled]
+  projects_v2_item:
+    types: [edited]
   workflow_dispatch:
     inputs:
-      ticket_id:
-        description: "GitHub issue/task id"
-        required: true
-        type: string
-      ticket_title:
-        description: "Task title"
-        required: true
-        type: string
-      ticket_body:
-        description: "Task details / acceptance criteria"
-        required: true
-        type: string
-      reviewers:
-        description: "Comma-separated GitHub usernames, e.g. user1,user2"
-        required: false
-        type: string
+      ticket_id:    { description: "Issue number",          required: true,  type: string }
+      ticket_title: { description: "Task title",            required: true,  type: string }
+      ticket_body:  { description: "Task details / AC",     required: true,  type: string }
+      reviewers:    { description: "Comma-separated users", required: false, type: string }
       agent:
         description: "AI agent"
         required: true
         type: choice
-        options:
-          - claude
-          - codex
+        options: [claude]      # codex disabled until action name is verified
         default: claude
 
 permissions:
-  contents: write
-  pull-requests: write
-  issues: write
-  actions: read
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: ai-worker-${{ github.event.issue.number || github.event.projects_v2_item.id || inputs.ticket_id }}
+  cancel-in-progress: false
 
 jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      run:          ${{ steps.g.outputs.run }}
+      agent:        ${{ steps.g.outputs.agent }}
+      ticket_id:    ${{ steps.g.outputs.ticket_id }}
+      ticket_title: ${{ steps.g.outputs.ticket_title }}
+      ticket_body:  ${{ steps.g.outputs.ticket_body }}
+      reviewers:    ${{ steps.g.outputs.reviewers }}
+    steps:
+      - id: g
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const e = context.payload;
+            let run = false, agent = 'claude';
+            let ticket_id = '', ticket_title = '', ticket_body = '', reviewers = '';
+
+            // 1. Issue labeled trigger
+            if (context.eventName === 'issues' && e.action === 'labeled') {
+              const labels = e.issue.labels.map(l => l.name);
+              if (labels.includes('ready-for-ai')) {
+                run = true;
+                ticket_id    = String(e.issue.number);
+                ticket_title = e.issue.title;
+                ticket_body  = e.issue.body || '';
+                reviewers    = (e.issue.assignees || []).map(a => a.login).join(',');
+              }
+            }
+
+            // 2. Projects v2 item status change trigger
+            if (context.eventName === 'projects_v2_item' && e.changes?.field_value) {
+              const f = e.changes.field_value;
+              if (f.field_name === 'Status' && f.to?.name === 'Ready for AI') {
+                const q = `query($id: ID!) { node(id: $id) {
+                  ... on ProjectV2Item { content { ... on Issue {
+                    number title body assignees(first:10){nodes{login}}
+                  } } }
+                }}`;
+                const r = await github.graphql(q, { id: e.projects_v2_item.node_id });
+                const i = r.node?.content;
+                if (i?.number) {
+                  run = true;
+                  ticket_id    = String(i.number);
+                  ticket_title = i.title;
+                  ticket_body  = i.body || '';
+                  reviewers    = (i.assignees?.nodes || []).map(n => n.login).join(',');
+                }
+              }
+            }
+
+            // 3. Manual replay
+            if (context.eventName === 'workflow_dispatch') {
+              run = true;
+              agent        = `${{ inputs.agent }}`;
+              ticket_id    = `${{ inputs.ticket_id }}`;
+              ticket_title = `${{ inputs.ticket_title }}`;
+              ticket_body  = `${{ inputs.ticket_body }}`;
+              reviewers    = `${{ inputs.reviewers }}`;
+            }
+
+            core.setOutput('run', run);
+            core.setOutput('agent', agent);
+            core.setOutput('ticket_id', ticket_id);
+            core.setOutput('ticket_title', ticket_title);
+            core.setOutput('ticket_body', ticket_body);
+            core.setOutput('reviewers', reviewers || 'vasan-s');
+
   ai-change:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: self-hosted
     timeout-minutes: 30
-
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
     env:
-      TICKET_ID: ${{ inputs.ticket_id }}
-      TICKET_TITLE: ${{ inputs.ticket_title }}
-      TICKET_BODY: ${{ inputs.ticket_body }}
-      AI_DOC_PATH: docs/ai-analysis/task-${{ inputs.ticket_id }}.md
-
+      TICKET_ID:    ${{ needs.gate.outputs.ticket_id }}
+      TICKET_TITLE: ${{ needs.gate.outputs.ticket_title }}
+      TICKET_BODY:  ${{ needs.gate.outputs.ticket_body }}
+      AI_AGENT:     ${{ needs.gate.outputs.agent }}
+      AI_DOC_PATH:  docs/ai-analysis/task-${{ needs.gate.outputs.ticket_id }}.md
 
     steps:
+      - name: Clean workspace (self-hosted hygiene)
+        run: |
+          git clean -fdx || true
+          git reset --hard HEAD || true
+
       - name: Checkout main
         uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
-
-      - name: Show ticket input
-        run: |
-          echo "Ticket ID: ${{ inputs.ticket_id }}"
-          echo "Title: ${{ inputs.ticket_title }}"
-          echo "Agent: ${{ inputs.agent }}"
 
       - name: Validate required harness files
         run: |
           test -f .ai-harness/prompt.md
           test -f .ai-harness/AI_DOCUMENT_TEMPLATE.md
+          test -f AGENTS.md
           mkdir -p docs/ai-analysis
 
+      - name: Show ticket input
+        run: |
+          echo "Ticket ID: ${TICKET_ID}"
+          echo "Title:     ${TICKET_TITLE}"
+          echo "Agent:     ${AI_AGENT}"
+
       - name: Run Claude Code
-        if: inputs.agent == 'claude'
+        if: needs.gate.outputs.agent == 'claude'
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: |
-            Follow .ai-harness/prompt.md strictly.
+            Read AGENTS.md and .ai-harness/prompt.md before anything else.
+            They are binding.
 
-            Ticket ID: ${{ inputs.ticket_id }}
-            Title: ${{ inputs.ticket_title }}
-
-            Task Body:
-            ${{ inputs.ticket_body }}
-
-            Mandatory output:
-            - Implement the requested change.
-            - Create AI analysis doc at docs/ai-analysis/task-${{ inputs.ticket_id }}.md.
-            - Keep the change minimal and PR-ready.
-      
-      - name: Run Codex
-        if: inputs.agent == 'codex'
-        uses: openai/codex-action@v1
-        with:
-          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
-          prompt: |
-            Follow .ai-harness/prompt.md strictly.
-
-            Ticket ID: ${{ inputs.ticket_id }}
-            Title: ${{ inputs.ticket_title }}
+            Ticket ID: ${{ env.TICKET_ID }}
+            Title: ${{ env.TICKET_TITLE }}
 
             Task Body:
-            ${{ inputs.ticket_body }}
+            ${{ env.TICKET_BODY }}
 
-            Mandatory output:
-            - Implement the requested change.
-            - Create AI analysis doc at docs/ai-analysis/task-${{ inputs.ticket_id }}.md.
+            Output requirements:
+            - Implement the change inside allowed paths only.
+            - Create AI analysis doc at ${{ env.AI_DOC_PATH }} using
+              .ai-harness/AI_DOCUMENT_TEMPLATE.md as the template.
             - Keep the change minimal and PR-ready.
+
+      # ---- Codex disabled until action name is verified ----
+      # - name: Run Codex
+      #   if: needs.gate.outputs.agent == 'codex'
+      #   uses: openai/codex-action@v1
+      #   with:
+      #     openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+      #     prompt: |
+      #       Read AGENTS.md and .ai-harness/prompt.md before anything else.
+      #       Ticket ID: ${{ env.TICKET_ID }}
+      #       Title: ${{ env.TICKET_TITLE }}
+      #       Task Body:
+      #       ${{ env.TICKET_BODY }}
 
       - name: Ensure AI made changes
         run: |
           if git diff --quiet; then
-            echo "Harness violation: AI made no changes."
+            echo "::error::Harness violation: AI made no changes."
             exit 1
           fi
 
       - name: Ensure AI analysis document exists
         run: |
           if [ ! -f "$AI_DOC_PATH" ]; then
-            echo "Harness violation: missing AI analysis document at $AI_DOC_PATH"
+            echo "::error::Harness violation: missing $AI_DOC_PATH"
             exit 1
           fi
 
       - name: Validate forbidden paths
         run: |
-          CHANGED_FILES=$(git diff --name-only)
-
+          CHANGED=$(git diff --name-only)
           echo "Changed files:"
-          echo "$CHANGED_FILES"
-
-          if echo "$CHANGED_FILES" | grep -E '^(\.github/|infra/|terraform/|k8s/|helm/|secrets/|\.env)'; then
-            echo "Harness violation: forbidden path changed."
+          echo "$CHANGED"
+          if echo "$CHANGED" | grep -E '^(\.github/|infra/|terraform/|k8s/|helm/|secrets/|\.env|AGENTS\.md$|\.ai-harness/)'; then
+            echo "::error::Harness violation: forbidden path changed."
             exit 1
           fi
 
       - name: Validate change size
         run: |
-          CHANGED_FILE_COUNT=$(git diff --name-only | wc -l | tr -d ' ')
-          CHANGED_LINE_COUNT=$(git diff --numstat | awk '{ added += $1; deleted += $2 } END { print added + deleted }')
+          FILES=$(git diff --name-only | wc -l | tr -d ' ')
+          LINES=$(git diff --numstat | awk '{a+=$1;d+=$2} END{print a+d}')
+          echo "Changed files: $FILES"
+          echo "Changed lines: $LINES"
+          [ "$FILES" -le 12 ] || { echo "::error::Too many files ($FILES > 12)"; exit 1; }
+          [ "$LINES" -le 600 ] || { echo "::error::Too many lines ($LINES > 600)"; exit 1; }
 
-          echo "Changed files: $CHANGED_FILE_COUNT"
-          echo "Changed lines: $CHANGED_LINE_COUNT"
-
-          if [ "$CHANGED_FILE_COUNT" -gt 12 ]; then
-            echo "Harness violation: too many files changed."
-            exit 1
-          fi
-
-          if [ "$CHANGED_LINE_COUNT" -gt 600 ]; then
-            echo "Harness violation: too many lines changed."
-            exit 1
-          fi
-
-      - name: Run checks if package.json exists
+      - name: Backend checks (lint + tests)
         run: |
-          if [ -f package.json ]; then
+          if [ -f backend/requirements.txt ]; then
+            python3 -m venv .venv-ci
+            . .venv-ci/bin/activate
+            pip install -q -r backend/requirements.txt -r backend/requirements-dev.txt
+            ruff check backend
+            PYTHONPATH=. pytest backend/tests -q
+          fi
+
+      - name: Frontend checks (test + build)
+        run: |
+          if [ -f frontend/package.json ]; then
+            cd frontend
             npm ci
-            npm run lint --if-present
-            npm run typecheck --if-present
-            npm test --if-present
-          else
-            echo "No package.json found. Skipping Node checks."
+            npm test
+            npm run build
           fi
 
-      - name: Resolve reviewers
-        id: reviewers
-        run: |
-          REVIEWERS=""
-
-          if [ "${{ github.event_name }}" = "issues" ]; then
-            REVIEWERS=$(echo '${{ toJson(github.event.issue.assignees) }}' | jq -r '.[].login' | paste -sd "," -)
-          else
-            REVIEWERS="${{ inputs.reviewers }}"
-          fi
-
-          if [ -z "$REVIEWERS" ]; then
-            REVIEWERS="vasan-s"
-          fi
-
-          echo "reviewers=$REVIEWERS" >> "$GITHUB_OUTPUT"
-
-      - name: Create PR body
+      - name: Write PR body
         run: |
           cat > pr-body.md <<EOF
           ## Summary
 
-          AI-generated change for task: ${{ inputs.ticket_title }}
+          AI-generated change for: ${TICKET_TITLE}
 
           ## Source Task
 
-          Ticket/task ID: ${{ inputs.ticket_id }}
-
-          ## Task Body
-
-          ${{ inputs.ticket_body }}
+          Closes #${TICKET_ID}
 
           ## AI Analysis Document
 
-          See: \`${AI_DOC_PATH}\`
+          See \`${AI_DOC_PATH}\`.
 
           ## Harness Result
 
-          - AI analysis document exists
-          - Forbidden path validation passed
-          - Change size validation passed
+          - AI analysis document present
+          - Forbidden-path validation passed
+          - Change-size validation passed (≤ 12 files / ≤ 600 lines)
+          - Backend lint + tests passed
+          - Frontend tests + build passed
           - Human review required
 
-          ## Reviewer
+          ## Reviewer(s)
 
-          Requested reviewer(s): ${{ steps.reviewers.outputs.reviewers }}
+          Requested: ${{ needs.gate.outputs.reviewers }}
           EOF
-
 
       - name: Create PR
         uses: peter-evans/create-pull-request@v6
         with:
+          # MUST be a PAT / App token — using GITHUB_TOKEN would suppress
+          # downstream workflows (ci, ai-pr-guard) on the opened PR.
+          token: ${{ secrets.AI_BOT_TOKEN }}
           base: main
-          branch: ai/task-${{ inputs.ticket_id }}-${{ github.run_id }}
-          commit-message: "ai: implement task ${{ inputs.ticket_id }}"
-          title: "AI task: ${{ inputs.ticket_title }}"
+          branch: ai/${{ needs.gate.outputs.agent }}/issue-${{ env.TICKET_ID }}-${{ github.run_id }}
+          commit-message: "ai(${{ needs.gate.outputs.agent }}): task #${{ env.TICKET_ID }}"
+          title: "[ai/${{ needs.gate.outputs.agent }}] ${{ env.TICKET_TITLE }}"
           body-path: pr-body.md
           labels: |
             ai-generated
             needs-human-review
-          reviewers: ${{ steps.reviewers.outputs.reviewers }}
+            agent:${{ needs.gate.outputs.agent }}
+          reviewers: ${{ needs.gate.outputs.reviewers }}
           delete-branch: true
+          draft: true
+
+      - name: Comment on issue
+        if: env.TICKET_ID != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: Number(process.env.TICKET_ID),
+              body: `AI worker (\`${process.env.AI_AGENT}\`) finished. [Logs](${run}).`,
+            });

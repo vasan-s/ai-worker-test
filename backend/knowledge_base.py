@@ -1,6 +1,6 @@
 """Hardcoded knowledge base for places and weather forecasts."""
 
-from datetime import date, timedelta
+from datetime import date
 import random
 
 PLACES = {

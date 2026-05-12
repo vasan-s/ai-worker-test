@@ -1,6 +1,6 @@
 """Booking specialist agent. Exposes A2A endpoints to create bookings."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
@@ -87,7 +87,7 @@ def _create_booking(task: Task) -> TaskResult:
         "num_travelers": num,
         "total_price_usd": price,
         "currency_at_destination": place["currency"],
-        "booked_at_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "booked_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "status": "CONFIRMED",
     }
     _BOOKINGS[code] = record

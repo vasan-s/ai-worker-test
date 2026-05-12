@@ -1,0 +1,107 @@
+# .github/workflows/ai-pr-guard.yml
+#
+# Post-validation for PRs from ai/** branches. Re-runs every harness check on
+# whatever state the PR is currently in — so the rules still hold even if the
+# agent pushes a second commit, force-pushes, or someone edits the PR body.
+#
+# Add `ai-pr-guard / guard` as a required status check in branch protection.
+
+name: ai-pr-guard
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  guard:
+    if: startsWith(github.head_ref, 'ai/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: PR body must use the template
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.pull_request.body || '';
+            if (!/Closes #\d+/.test(body)) {
+              core.setFailed('PR body must reference an issue with `Closes #N`.');
+            }
+            const required = [
+              '## Summary',
+              '## Source Task',
+              '## AI Analysis Document',
+              '## Harness Result',
+            ];
+            const missing = required.filter(h => !body.includes(h));
+            if (missing.length) {
+              core.setFailed(`PR body missing sections: ${missing.join(', ')}`);
+            }
+
+      - name: AI analysis doc must exist for the linked issue
+        run: |
+          BODY=$(jq -r '.pull_request.body' "$GITHUB_EVENT_PATH")
+          ISSUE=$(echo "$BODY" | grep -oE 'Closes #[0-9]+' | head -1 | grep -oE '[0-9]+')
+          if [ -z "$ISSUE" ]; then
+            echo "::error::Could not extract issue number from PR body."
+            exit 1
+          fi
+          if [ ! -f "docs/ai-analysis/task-$ISSUE.md" ]; then
+            echo "::error::Missing docs/ai-analysis/task-$ISSUE.md"
+            exit 1
+          fi
+
+      - name: Forbidden paths (re-check current diff)
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          CHANGED=$(git diff --name-only "$BASE" "$HEAD")
+          echo "$CHANGED"
+          if echo "$CHANGED" | grep -E '^(\.github/|infra/|terraform/|k8s/|helm/|secrets/|\.env|AGENTS\.md$|\.ai-harness/)'; then
+            echo "::error::Forbidden path in PR diff."
+            exit 1
+          fi
+
+      - name: Size cap (re-check current diff)
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          FILES=$(git diff --name-only "$BASE" "$HEAD" | wc -l | tr -d ' ')
+          LINES=$(git diff --numstat "$BASE" "$HEAD" | awk '{a+=$1;d+=$2} END{print a+d}')
+          echo "Files: $FILES  Lines: $LINES"
+          [ "$FILES" -le 12 ]  || { echo "::error::Files=$FILES > 12";  exit 1; }
+          [ "$LINES" -le 600 ] || { echo "::error::Lines=$LINES > 600"; exit 1; }
+
+      - name: Block force-push on AI branches
+        if: github.event.action == 'synchronize'
+        run: |
+          BEFORE="${{ github.event.before }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          if ! git merge-base --is-ancestor "$BEFORE" "$HEAD"; then
+            echo "::error::Force-push on AI branch is not allowed."
+            exit 1
+          fi
+
+      - name: Require human reviewer to be present
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const reviewers = await github.rest.pulls.listRequestedReviewers(
+              { ...context.repo, pull_number: pr.number });
+            const reviews = await github.rest.pulls.listReviews(
+              { ...context.repo, pull_number: pr.number });
+            const hasReviewer =
+              reviewers.data.users.length > 0 ||
+              reviewers.data.teams.length > 0 ||
+              reviews.data.length > 0;
+            if (!hasReviewer) {
+              core.setFailed('AI PR has no human reviewer requested.');
+            }
