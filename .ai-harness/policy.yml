@@ -1,0 +1,50 @@
+mode: pr_only
+
+git:
+  base_branch: main
+  branch_prefix: ai/
+  allow_push_main: false
+  allow_merge: false
+
+allowed_paths:
+  - src/**
+  - tests/**
+  - docs/**
+
+blocked_paths:
+  - .github/**
+  - infra/**
+  - terraform/**
+  - k8s/**
+  - helm/**
+  - secrets/**
+  - .env*
+  - package-lock.json
+  - pnpm-lock.yaml
+
+blocked_change_types:
+  - delete_large_file
+  - mass_formatting
+  - dependency_upgrade
+  - workflow_change
+  - secret_change
+
+high_risk_keywords:
+  - auth
+  - authorization
+  - authentication
+  - payment
+  - permission
+  - encryption
+  - token
+  - secret
+  - password
+  - database migration
+  - production
+  - deployment
+
+required_checks:
+  - lint
+  - typecheck
+  - test
+  - security_scan

@@ -41,6 +41,13 @@ jobs:
     runs-on: self-hosted
     timeout-minutes: 30
 
+    env:
+      TICKET_ID: ${{ inputs.ticket_id }}
+      TICKET_TITLE: ${{ inputs.ticket_title }}
+      TICKET_BODY: ${{ inputs.ticket_body }}
+      AI_DOC_PATH: docs/ai-analysis/task-${{ inputs.ticket_id }}.md
+
+
     steps:
       - name: Checkout main
         uses: actions/checkout@v4
@@ -53,17 +60,104 @@ jobs:
           echo "Title: ${{ inputs.ticket_title }}"
           echo "Agent: ${{ inputs.agent }}"
 
-      - name: Placeholder AI step
+      - name: Validate required harness files
         run: |
-          echo "Later this step will run Claude Code or Codex"
-          echo "For now, manual trigger is working."
+          test -f .ai-harness/prompt.md
+          test -f .ai-harness/AI_DOCUMENT_TEMPLATE.md
+          mkdir -p docs/ai-analysis
 
-      - name: Create test change
+      - name: Run Claude Code
+        if: inputs.agent == 'claude'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Follow .ai-harness/prompt.md strictly.
+
+            Ticket ID: ${{ inputs.ticket_id }}
+            Title: ${{ inputs.ticket_title }}
+
+            Task Body:
+            ${{ inputs.ticket_body }}
+
+            Mandatory output:
+            - Implement the requested change.
+            - Create AI analysis doc at docs/ai-analysis/task-${{ inputs.ticket_id }}.md.
+            - Keep the change minimal and PR-ready.
+      
+      - name: Run Codex
+        if: inputs.agent == 'codex'
+        uses: openai/codex-action@v1
+        with:
+          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+          prompt: |
+            Follow .ai-harness/prompt.md strictly.
+
+            Ticket ID: ${{ inputs.ticket_id }}
+            Title: ${{ inputs.ticket_title }}
+
+            Task Body:
+            ${{ inputs.ticket_body }}
+
+            Mandatory output:
+            - Implement the requested change.
+            - Create AI analysis doc at docs/ai-analysis/task-${{ inputs.ticket_id }}.md.
+            - Keep the change minimal and PR-ready.
+
+      - name: Ensure AI made changes
         run: |
-          mkdir -p .ai-runs
-          echo "AI manual run for ticket/task ${{ inputs.ticket_id }}" > .ai-runs/${{ github.run_id }}.txt
-          echo "Title: ${{ inputs.ticket_title }}" >> .ai-runs/${{ github.run_id }}.txt
-          echo "Agent: ${{ inputs.agent }}" >> .ai-runs/${{ github.run_id }}.txt
+          if git diff --quiet; then
+            echo "Harness violation: AI made no changes."
+            exit 1
+          fi
+
+      - name: Ensure AI analysis document exists
+        run: |
+          if [ ! -f "$AI_DOC_PATH" ]; then
+            echo "Harness violation: missing AI analysis document at $AI_DOC_PATH"
+            exit 1
+          fi
+
+      - name: Validate forbidden paths
+        run: |
+          CHANGED_FILES=$(git diff --name-only)
+
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+
+          if echo "$CHANGED_FILES" | grep -E '^(\.github/|infra/|terraform/|k8s/|helm/|secrets/|\.env)'; then
+            echo "Harness violation: forbidden path changed."
+            exit 1
+          fi
+
+      - name: Validate change size
+        run: |
+          CHANGED_FILE_COUNT=$(git diff --name-only | wc -l | tr -d ' ')
+          CHANGED_LINE_COUNT=$(git diff --numstat | awk '{ added += $1; deleted += $2 } END { print added + deleted }')
+
+          echo "Changed files: $CHANGED_FILE_COUNT"
+          echo "Changed lines: $CHANGED_LINE_COUNT"
+
+          if [ "$CHANGED_FILE_COUNT" -gt 12 ]; then
+            echo "Harness violation: too many files changed."
+            exit 1
+          fi
+
+          if [ "$CHANGED_LINE_COUNT" -gt 600 ]; then
+            echo "Harness violation: too many lines changed."
+            exit 1
+          fi
+
+      - name: Run checks if package.json exists
+        run: |
+          if [ -f package.json ]; then
+            npm ci
+            npm run lint --if-present
+            npm run typecheck --if-present
+            npm test --if-present
+          else
+            echo "No package.json found. Skipping Node checks."
+          fi
 
       - name: Resolve reviewers
         id: reviewers
@@ -82,27 +176,48 @@ jobs:
 
           echo "reviewers=$REVIEWERS" >> "$GITHUB_OUTPUT"
 
+      - name: Create PR body
+        run: |
+          cat > pr-body.md <<EOF
+          ## Summary
+
+          AI-generated change for task: ${{ inputs.ticket_title }}
+
+          ## Source Task
+
+          Ticket/task ID: ${{ inputs.ticket_id }}
+
+          ## Task Body
+
+          ${{ inputs.ticket_body }}
+
+          ## AI Analysis Document
+
+          See: \`${AI_DOC_PATH}\`
+
+          ## Harness Result
+
+          - AI analysis document exists
+          - Forbidden path validation passed
+          - Change size validation passed
+          - Human review required
+
+          ## Reviewer
+
+          Requested reviewer(s): ${{ steps.reviewers.outputs.reviewers }}
+          EOF
+
+
       - name: Create PR
         uses: peter-evans/create-pull-request@v6
         with:
           base: main
           branch: ai/task-${{ inputs.ticket_id }}-${{ github.run_id }}
-          commit-message: "chore: test AI worker for task ${{ inputs.ticket_id }}"
-          title: "AI task test: ${{ inputs.ticket_title }}"
-          body: |
-            Source: Manual workflow
-
-            Ticket ID: ${{ inputs.ticket_id }}
-
-            Task:
-            ${{ inputs.ticket_body }}
-
-            Agent selected: ${{ inputs.agent }}
-
-            This is a manual test PR from the AI harness workflow.
-            Human review required.
+          commit-message: "ai: implement task ${{ inputs.ticket_id }}"
+          title: "AI task: ${{ inputs.ticket_title }}"
+          body-path: pr-body.md
           labels: |
             ai-generated
             needs-human-review
-          delete-branch: true
           reviewers: ${{ steps.reviewers.outputs.reviewers }}
+          delete-branch: true
