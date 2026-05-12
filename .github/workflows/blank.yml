@@ -1,0 +1,88 @@
+name: AI Worker Manual
+
+on:
+  workflow_dispatch:
+    inputs:
+      ticket_id:
+        description: "GitHub issue/task id"
+        required: true
+        type: string
+      ticket_title:
+        description: "Task title"
+        required: true
+        type: string
+      ticket_body:
+        description: "Task details / acceptance criteria"
+        required: true
+        type: string
+      agent:
+        description: "AI agent"
+        required: true
+        type: choice
+        options:
+          - claude
+          - codex
+        default: claude
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: read
+
+jobs:
+  ai-change:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Show ticket input
+        run: |
+          echo "Ticket ID: ${{ inputs.ticket_id }}"
+          echo "Title: ${{ inputs.ticket_title }}"
+          echo "Agent: ${{ inputs.agent }}"
+
+      - name: Create branch
+        run: |
+          git checkout -b ai/task-${{ inputs.ticket_id }}-${{ github.run_id }}
+
+      - name: Placeholder AI step
+        run: |
+          echo "Later this step will run Claude Code or Codex"
+          echo "For now, manual trigger is working."
+
+      - name: Validate no forbidden changes
+        run: |
+          echo "No AI changes yet, so validation passes."
+
+      - name: Create empty test PR marker
+        run: |
+          mkdir -p .ai-runs
+          echo "AI manual run for ${{ inputs.ticket_id }}" > .ai-runs/${{ github.run_id }}.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .ai-runs/${{ github.run_id }}.txt
+          git commit -m "chore: test AI worker for task ${{ inputs.ticket_id }}"
+
+      - name: Create PR
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: ai/task-${{ inputs.ticket_id }}-${{ github.run_id }}
+          title: "AI task test: ${{ inputs.ticket_title }}"
+          body: |
+            Source: Manual workflow
+
+            Ticket ID: ${{ inputs.ticket_id }}
+
+            Task:
+            ${{ inputs.ticket_body }}
+
+            This is a manual test PR from the AI harness workflow.
+          labels: |
+            ai-generated
+            needs-human-review
